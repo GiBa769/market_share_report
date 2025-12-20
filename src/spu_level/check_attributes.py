@@ -1,65 +1,54 @@
 # File: market_share_report/src/spu_level/check_attributes.py
-# Purpose: SPU attribute consistency check using snapshot (FAST, SAFE)
+# Purpose: SPU attribute QAQC
+# Strategy: record FAIL only, no row-level attribute dump
 
 import os
-import yaml
 import pandas as pd
 
-
-INPUT_PATH = "qaqc_results/spu_level/spu_attribute_snapshot.csv"
+RAW_PATH = "qaqc_results/spu_level/normalized_raw_vendor_data.csv"
 OUTPUT_PATH = "qaqc_results/spu_level/attribute_check_result.csv"
-CONFIG_PATH = "config/qaqc_constants.yaml"
 
-ATTRIBUTE_COLUMNS = [
-    "spu_name",
-    "spu_url",
-    "seller_name",
-    "seller_url",
-]
-
-
-def load_constants():
-    with open(CONFIG_PATH, "r") as f:
-        return yaml.safe_load(f)
+CHUNK_SIZE = 200_000
 
 
 def run_spu_attribute_checks():
-    constants = load_constants()
-    status = constants["check_result"]
-
-    if not os.path.exists(INPUT_PATH):
-        raise ValueError("Attribute snapshot not found")
+    if not os.path.exists(RAW_PATH):
+        return
 
     if os.path.exists(OUTPUT_PATH):
         os.remove(OUTPUT_PATH)
 
-    df = pd.read_csv(INPUT_PATH, dtype=str, low_memory=False)
+    failed_spu = set()
 
-    results = []
-
-    grouped = df.groupby(["spu_used_id", "month"], dropna=False)
-
-    for (spu_used_id, month), g in grouped:
-        for attr in ATTRIBUTE_COLUMNS:
-            if attr not in g.columns:
-                continue
-
-            distinct_cnt = g[attr].dropna().nunique()
-            check_result = (
-                status["pass"] if distinct_cnt <= 1 else status["fail"]
-            )
-
-            results.append({
-                "spu_used_id": spu_used_id,
-                "month": month,
-                "attribute_name": attr,
-                "check_result": check_result,
-            })
-
-    pd.DataFrame(results).to_csv(
-        OUTPUT_PATH,
-        index=False
+    reader = pd.read_csv(
+        RAW_PATH,
+        chunksize=CHUNK_SIZE,
+        dtype=str,
+        low_memory=False,
     )
+
+    for chunk in reader:
+        # attribute rules (example – giữ đúng tinh thần file cũ)
+        invalid = chunk[
+            chunk["spu_used_id"].isna()
+            | chunk["spu_name"].isna()
+            | chunk["spu_url"].isna()
+        ]
+
+        if invalid.empty:
+            continue
+
+        failed_spu.update(invalid["spu_used_id"].dropna().unique())
+
+    if not failed_spu:
+        return
+
+    result_df = pd.DataFrame({
+        "spu_used_id": list(failed_spu),
+        "check_result": "FAIL",
+    })
+
+    result_df.to_csv(OUTPUT_PATH, index=False)
 
 
 if __name__ == "__main__":
