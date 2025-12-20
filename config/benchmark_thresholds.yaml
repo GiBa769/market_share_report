@@ -1,0 +1,34 @@
+# File: market_share_report/config/benchmark_thresholds.yaml
+
+seller_level:
+  spu_coverage_ratio:
+    pass_min_pct: 95
+
+category_level:
+  spu_coverage_ratio:
+    pass_min_pct: 95
+
+spu_metric:
+  same_month:
+    asp_ratio:
+      min_pct: 80
+      max_pct: 120
+    historical_quantity_ratio:
+      min_pct: 80
+      max_pct: 120
+    historical_rating_ratio:
+      min_pct: 80
+      max_pct: 120
+
+  diff_months:
+    default:
+      min_pct: 80
+      max_pct: 200
+
+    low_volume_condition:
+      min_avg_quantity: 10
+      action: pass
+
+    new_category_condition:
+      min_spu_count: 300
+      action: pass

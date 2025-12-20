@@ -1,0 +1,20 @@
+# File: market_share_report/config/qaqc_constants.yaml
+
+check_result:
+  pass: PASS
+  fail: FAIL
+  skipped: SKIPPED
+
+vendor_group_type:
+  vendor_id: vendor_id
+  time_scraped: time_scraped
+  single_source: single_source
+
+spu_level_type:
+  seller: seller
+  category: category
+
+metric_names:
+  asp: asp
+  historical_quantity: historical_quantity
+  historical_rating: historical_rating

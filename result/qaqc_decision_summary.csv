@@ -1,6 +1,0 @@
-scope_country,stage,check_name,status,key_metric,benchmark,reference_file
-PH,vendor-input,vendor_coverage,PASS,coverage_ratio,>=95%,qaqc_vendor_coverage.csv
-PH,vendor-input,vendor_trend_seller,WARN,trend_ratio,"drop<80%, increase>=200%",qaqc_vendor_seller_trend_multi_month.csv
-PH,vendor-input,vendor_trend_category,PASS,trend_ratio,"drop<80%, increase>=200%",qaqc_vendor_category_trend_multi_month.csv
-PH,computed-output,market_share_pairwise,WARN,abnormal_type,spike / source-switch,qaqc_market_share_latest_abnormal.csv
-PH,computed-output,market_share_trend_multi_month,WARN,trend_ratio,"drop<80%, increase>=200%",qaqc_market_share_latest_trend_multi_month.csv
