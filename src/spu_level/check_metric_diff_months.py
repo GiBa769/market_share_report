@@ -15,6 +15,8 @@ CFG_THRESHOLD = "config/benchmark_thresholds.yaml"
 CFG_CONST = "config/qaqc_constants.yaml"
 
 METRICS = ["asp", "historical_quantity", "historical_rating"]
+# Allow history files that still use the legacy column name "historical_review".
+HIST_ALIASES = {"historical_rating": ["historical_rating", "historical_review"]}
 CUR_CHUNK_SIZE = 200_000
 HIST_CHUNK_SIZE = 200_000
 
@@ -29,11 +31,14 @@ def _accumulate_means(reader, group_keys):
     acc = {}
     for chunk in reader:
         chunk = chunk.dropna(subset=list(group_keys))
-        for metric in METRICS:
-            if metric in chunk.columns:
-                chunk[metric] = pd.to_numeric(chunk[metric], errors="coerce")
+        present_metrics = [m for m in METRICS if m in chunk.columns]
+        if not present_metrics:
+            continue
 
-        grouped = chunk.groupby(list(group_keys))[METRICS]
+        for metric in present_metrics:
+            chunk[metric] = pd.to_numeric(chunk[metric], errors="coerce")
+
+        grouped = chunk.groupby(list(group_keys))[present_metrics]
         summary = grouped.agg(["sum", "count"])
 
         for idx, row in summary.iterrows():
@@ -64,18 +69,59 @@ def _load_history_means():
         return pd.DataFrame()
 
     acc = {}
+    total_rows = 0
     for fname in os.listdir(HIST_DIR):
         if not fname.endswith(".csv"):
             continue
 
+        fpath = os.path.join(HIST_DIR, fname)
+        header = pd.read_csv(fpath, nrows=0)
+
+        # pick the available alias column for each metric
+        metric_cols = []
+        rename_map = {}
+        for metric in METRICS:
+            aliases = HIST_ALIASES.get(metric, [metric])
+            for col in aliases:
+                if col in header.columns:
+                    metric_cols.append(col)
+                    if col != metric:
+                        rename_map[col] = metric
+                    break
+
+        if not metric_cols:
+            continue
+
+        usecols = ["spu_used_id", *metric_cols]
         reader = pd.read_csv(
-            os.path.join(HIST_DIR, fname),
+            fpath,
             chunksize=HIST_CHUNK_SIZE,
             dtype=str,
-            usecols=["spu_used_id", *METRICS],
+            usecols=usecols,
             low_memory=False,
         )
+
+        if rename_map:
+            reader = (chunk.rename(columns=rename_map) for chunk in reader)
+
         file_acc = _accumulate_means(reader, group_keys=["spu_used_id"])
+
+        # normalize legacy column names to canonical
+        if rename_map:
+            for key in file_acc:
+                for old, new in rename_map.items():
+                    file_acc[key][new] = file_acc[key].get(new, {"sum": 0.0, "count": 0.0})
+                    file_acc[key][new]["sum"] += file_acc[key].pop(old, {"sum": 0.0})["sum"]
+                    file_acc[key][new]["count"] += file_acc[key].pop(old, {"count": 0.0})["count"]
+
+        total_rows += sum(
+            max(v[m]["count"] for m in METRICS if m in v)
+            for v in file_acc.values()
+        )
+        print(
+            f"[diff_months] loaded history chunk from {fname}, total rows ~{int(total_rows):,} ...",
+            flush=True,
+        )
 
         # merge file_acc into acc
         for key, metrics in file_acc.items():
@@ -112,11 +158,17 @@ def run_spu_metric_diff_months_checks():
     )
     cur_acc = _accumulate_means(cur_reader, group_keys=["spu_used_id", "month"])
     cur_df = _acc_to_df(cur_acc, key_names=["spu_used_id", "month"])
+    print(
+        f"[diff_months] built current means for {len(cur_df):,} spu-month pairs",
+        flush=True,
+    )
     conn.close()
 
     hist_df = _load_history_means()
     if hist_df.empty or cur_df.empty:
         return
+
+    print(f"[diff_months] built history means for {len(hist_df):,} spu ids", flush=True)
 
     merged = cur_df.merge(hist_df, on="spu_used_id", suffixes=("_cur", "_hist"))
 
@@ -142,6 +194,9 @@ def run_spu_metric_diff_months_checks():
 
     if results:
         pd.DataFrame(results).to_csv(OUTPUT_PATH, index=False)
+        print(f"[diff_months] wrote {len(results):,} failures", flush=True)
+    else:
+        print("[diff_months] no failures found", flush=True)
 
 
 if __name__ == "__main__":
