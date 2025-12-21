@@ -35,6 +35,24 @@ CANONICAL_COLS = [
     "historical_rating",
 ]
 
+CANONICAL_COLS = [
+    "spu_used_id",
+    "month",
+    "spu_name",
+    "spu_url",
+    "seller_name",
+    "seller_url",
+    "seller_used_id",
+    "source",  # category_url
+    "country",
+    "platform",
+    "vendor_group",
+    "vendor_group_type",
+    "asp",
+    "historical_quantity",
+    "historical_rating",
+]
+
 
 def load_constants():
     with open(CONFIG_PATH, "r") as f:
