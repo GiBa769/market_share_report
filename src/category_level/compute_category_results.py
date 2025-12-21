@@ -20,6 +20,7 @@ CFG_CONST = "config/qaqc_constants.yaml"
 
 CHUNK_SIZE = 200_000
 TMP_DB = "qaqc_results/_tmp_qaqc_category.sqlite"
+COMMIT_EVERY = 20  # chunks
 
 
 def load_yaml(path):
@@ -82,6 +83,7 @@ def _build_category_spu_counts(spu_status_df):
         low_memory=False,
     )
 
+    chunk_idx = 0
     for chunk in reader:
         chunk = chunk.rename(columns={"source": "category_url"})
         pairs = chunk.dropna(subset=["category_url", "spu_used_id"]).drop_duplicates()
@@ -92,7 +94,11 @@ def _build_category_spu_counts(spu_status_df):
             "INSERT INTO category_spu(category_url, spu_used_id) VALUES(?, ?);",
             list(pairs.itertuples(index=False, name=None))
         )
-        conn.commit()
+        chunk_idx += 1
+        if chunk_idx % COMMIT_EVERY == 0:
+            conn.commit()
+
+    conn.commit()
 
     total_df = pd.read_sql_query(
         """
@@ -127,7 +133,7 @@ def compute_category_results():
 
     status = constants["check_result"]
 
-    pass_min_pct = thresholds["category_level"]["pass_min_pct"]
+    pass_min_pct = thresholds["category_level"]["spu_coverage_ratio"]["pass_min_pct"]
 
     if not os.path.exists(RAW_PATH):
         return
