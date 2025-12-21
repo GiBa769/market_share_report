@@ -20,6 +20,7 @@ CFG_CONST = "config/qaqc_constants.yaml"
 
 CHUNK_SIZE = 200_000
 TMP_DB = "qaqc_results/_tmp_qaqc_seller.sqlite"
+COMMIT_EVERY = 20  # chunks
 
 
 def load_yaml(path):
@@ -85,6 +86,7 @@ def _build_seller_spu_counts(spu_status_df):
         low_memory=False,
     )
 
+    chunk_idx = 0
     for chunk in reader:
         pairs = chunk.dropna(subset=["seller_used_id", "spu_used_id"]).drop_duplicates()
         if pairs.empty:
@@ -93,7 +95,11 @@ def _build_seller_spu_counts(spu_status_df):
             "INSERT INTO seller_spu(seller_used_id, spu_used_id) VALUES(?, ?);",
             list(pairs.itertuples(index=False, name=None))
         )
-        conn.commit()
+        chunk_idx += 1
+        if chunk_idx % COMMIT_EVERY == 0:
+            conn.commit()
+
+    conn.commit()
 
     # total distinct spu per seller
     total_df = pd.read_sql_query(
@@ -130,7 +136,7 @@ def compute_seller_results():
 
     status = constants["check_result"]
 
-    pass_min_pct = thresholds["seller_level"]["pass_min_pct"]
+    pass_min_pct = thresholds["seller_level"]["spu_coverage_ratio"]["pass_min_pct"]
 
     if not os.path.exists(RAW_PATH):
         return
