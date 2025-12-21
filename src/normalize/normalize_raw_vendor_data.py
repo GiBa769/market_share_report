@@ -35,6 +35,24 @@ CANONICAL_COLS = [
     "historical_rating",
 ]
 
+CANONICAL_COLS = [
+    "spu_used_id",
+    "month",
+    "spu_name",
+    "spu_url",
+    "seller_name",
+    "seller_url",
+    "seller_used_id",
+    "source",  # category_url
+    "country",
+    "platform",
+    "vendor_group",
+    "vendor_group_type",
+    "asp",
+    "historical_quantity",
+    "historical_rating",
+]
+
 
 def load_constants():
     with open(CONFIG_PATH, "r") as f:
@@ -48,18 +66,6 @@ def _write_manifest(constants, source_files, total_rows):
         f.write("source_files=" + ",".join(sorted(source_files)) + "\n")
         f.write("stored_as=sqlite\n")
         f.write("row_count=" + str(total_rows) + "\n")
-
-
-def _create_indexes(conn: sqlite3.Connection):
-    cur = conn.cursor()
-    # Indexes accelerate downstream group-by operations during QAQC.
-    cur.execute(
-        f"CREATE INDEX IF NOT EXISTS idx_norm_spu_month ON {SQL_TABLE}(spu_used_id, month);"
-    )
-    cur.execute(
-        f"CREATE INDEX IF NOT EXISTS idx_norm_vendor_group ON {SQL_TABLE}(vendor_group);"
-    )
-    conn.commit()
 
 
 def normalize_raw_vendor_data():
@@ -137,8 +143,6 @@ def normalize_raw_vendor_data():
                 print(f"[normalize] processed {total_rows:,} rows ...", flush=True)
 
     conn.commit()
-    print("[normalize] building indexes ...", flush=True)
-    _create_indexes(conn)
     conn.close()
 
     _write_manifest(constants, seen_sources, total_rows)
