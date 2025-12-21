@@ -3,17 +3,37 @@
 # Safe for very large input via chunked streaming writes
 
 import os
+import sqlite3
 import yaml
 import pandas as pd
 
 RAW_VENDOR_DATA_DIR = "data/raw_vendor_data"
 
 OUT_DIR = "qaqc_results/spu_level"
-OUT_NORMALIZED = f"{OUT_DIR}/normalized_raw_vendor_data.csv"
+OUT_DB = f"{OUT_DIR}/normalized_raw_vendor_data.sqlite"
 RUN_MANIFEST = f"{OUT_DIR}/_run_manifest.txt"
 
 CONFIG_PATH = "config/qaqc_constants.yaml"
 CHUNK_SIZE = 200_000
+SQL_TABLE = "normalized_raw_vendor_data"
+
+CANONICAL_COLS = [
+    "spu_used_id",
+    "month",
+    "spu_name",
+    "spu_url",
+    "seller_name",
+    "seller_url",
+    "seller_used_id",
+    "source",  # category_url
+    "country",
+    "platform",
+    "vendor_group",
+    "vendor_group_type",
+    "asp",
+    "historical_quantity",
+    "historical_rating",
+]
 
 CANONICAL_COLS = [
     "spu_used_id",
@@ -39,11 +59,13 @@ def load_constants():
         return yaml.safe_load(f)
 
 
-def _write_manifest(constants, source_files):
+def _write_manifest(constants, source_files, total_rows):
     with open(RUN_MANIFEST, "w") as f:
         f.write("chunk_size=" + str(CHUNK_SIZE) + "\n")
         f.write("vendor_group_type=" + str(constants.get("vendor_group_type", {})) + "\n")
         f.write("source_files=" + ",".join(sorted(source_files)) + "\n")
+        f.write("stored_as=sqlite\n")
+        f.write("row_count=" + str(total_rows) + "\n")
 
 
 def normalize_raw_vendor_data():
@@ -51,12 +73,18 @@ def normalize_raw_vendor_data():
     vendor_types = constants["vendor_group_type"]
 
     os.makedirs(OUT_DIR, exist_ok=True)
-    for p in [OUT_NORMALIZED, RUN_MANIFEST]:
+    for p in [OUT_DB, RUN_MANIFEST]:
         if os.path.exists(p):
             os.remove(p)
 
-    header_written = False
+    conn = sqlite3.connect(OUT_DB)
+    cur = conn.cursor()
+    cur.execute(f"DROP TABLE IF EXISTS {SQL_TABLE};")
+    conn.commit()
+
     seen_sources = []
+    total_rows = 0
+    chunk_idx = 0
 
     for fname in os.listdir(RAW_VENDOR_DATA_DIR):
         if not fname.endswith(".csv"):
@@ -71,6 +99,7 @@ def normalize_raw_vendor_data():
         )
 
         for chunk in reader:
+            chunk_idx += 1
             # normalize column presence
             if "historical_review" in chunk.columns and "historical_rating" not in chunk.columns:
                 chunk["historical_rating"] = chunk["historical_review"]
@@ -96,20 +125,33 @@ def normalize_raw_vendor_data():
             for c in missing_cols:
                 chunk[c] = pd.NA
 
-            normalized = (
-                chunk[CANONICAL_COLS]
-                .dropna(subset=["spu_used_id", "month"])
-            )
+            normalized = chunk[CANONICAL_COLS].dropna(subset=["spu_used_id", "month"])
+            if normalized.empty:
+                continue
 
-            normalized.to_csv(
-                OUT_NORMALIZED,
-                mode="a",
+            normalized.to_sql(
+                SQL_TABLE,
+                conn,
+                if_exists="append",
                 index=False,
-                header=not header_written,
+                method="multi",
+                chunksize=50_000,
             )
-            header_written = True
 
-    _write_manifest(constants, seen_sources)
+            total_rows += len(normalized)
+            if chunk_idx % 5 == 0:
+                print(f"[normalize] processed {total_rows:,} rows ...", flush=True)
+
+    conn.commit()
+    conn.close()
+
+    _write_manifest(constants, seen_sources, total_rows)
+
+
+def cleanup_normalized_store():
+    for p in [OUT_DB, RUN_MANIFEST]:
+        if os.path.exists(p):
+            os.remove(p)
 
 
 if __name__ == "__main__":

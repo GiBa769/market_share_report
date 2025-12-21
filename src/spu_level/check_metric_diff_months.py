@@ -2,10 +2,12 @@
 # Purpose: SPU metric diff-month QA – abnormal only, aggregated
 
 import os
+import sqlite3
 import yaml
 import pandas as pd
 
-CUR_PATH = "qaqc_results/spu_level/normalized_raw_vendor_data.csv"
+CUR_DB = "qaqc_results/spu_level/normalized_raw_vendor_data.sqlite"
+CUR_TABLE = "normalized_raw_vendor_data"
 HIST_DIR = "data/computed_data"
 OUTPUT_PATH = "qaqc_results/spu_level/metric_diff_months_result.csv"
 
@@ -99,18 +101,18 @@ def run_spu_metric_diff_months_checks():
     if os.path.exists(OUTPUT_PATH):
         os.remove(OUTPUT_PATH)
 
-    if not os.path.exists(CUR_PATH):
+    if not os.path.exists(CUR_DB):
         return
 
-    cur_reader = pd.read_csv(
-        CUR_PATH,
+    conn = sqlite3.connect(CUR_DB)
+    cur_reader = pd.read_sql_query(
+        f"SELECT spu_used_id, month, {', '.join(METRICS)} FROM {CUR_TABLE}",
+        conn,
         chunksize=CUR_CHUNK_SIZE,
-        dtype=str,
-        usecols=["spu_used_id", "month", *METRICS],
-        low_memory=False,
     )
     cur_acc = _accumulate_means(cur_reader, group_keys=["spu_used_id", "month"])
     cur_df = _acc_to_df(cur_acc, key_names=["spu_used_id", "month"])
+    conn.close()
 
     hist_df = _load_history_means()
     if hist_df.empty or cur_df.empty:

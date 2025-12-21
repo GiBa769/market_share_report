@@ -1,4 +1,4 @@
-# File: market_share_report/src/build_excel_report.py
+# File: market_share_report/src/build_report/build_excel_report.py
 # Purpose: Build final QAQC Excel report (summary only, no raw dump)
 
 import os

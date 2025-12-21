@@ -8,7 +8,8 @@ import sqlite3
 import pandas as pd
 
 
-RAW_PATH = "qaqc_results/spu_level/normalized_raw_vendor_data.csv"
+RAW_DB = "qaqc_results/spu_level/normalized_raw_vendor_data.sqlite"
+RAW_TABLE = "normalized_raw_vendor_data"
 ATTR_PATH = "qaqc_results/spu_level/attribute_check_result.csv"
 SAME_MONTH_PATH = "qaqc_results/spu_level/metric_same_month_result.csv"
 DIFF_MONTH_PATH = "qaqc_results/spu_level/metric_diff_months_result.csv"
@@ -78,15 +79,15 @@ def _build_seller_spu_counts(spu_status_df):
 
     conn.commit()
 
-    reader = pd.read_csv(
-        RAW_PATH,
+    raw_conn = sqlite3.connect(RAW_DB)
+    reader = pd.read_sql_query(
+        f"SELECT seller_used_id, spu_used_id FROM {RAW_TABLE}",
+        raw_conn,
         chunksize=CHUNK_SIZE,
-        dtype=str,
-        usecols=["seller_used_id", "spu_used_id"],
-        low_memory=False,
     )
 
     chunk_idx = 0
+    processed = 0
     for chunk in reader:
         pairs = chunk.dropna(subset=["seller_used_id", "spu_used_id"]).drop_duplicates()
         if pairs.empty:
@@ -98,6 +99,11 @@ def _build_seller_spu_counts(spu_status_df):
         chunk_idx += 1
         if chunk_idx % COMMIT_EVERY == 0:
             conn.commit()
+        processed += len(chunk)
+        if processed and processed % 300_000 == 0:
+            print(f"[seller] ingested {processed:,} rows ...", flush=True)
+
+    raw_conn.close()
 
     conn.commit()
 
@@ -138,7 +144,7 @@ def compute_seller_results():
 
     pass_min_pct = thresholds["seller_level"]["spu_coverage_ratio"]["pass_min_pct"]
 
-    if not os.path.exists(RAW_PATH):
+    if not os.path.exists(RAW_DB):
         return
 
     spu_status = _load_checks_minimal()

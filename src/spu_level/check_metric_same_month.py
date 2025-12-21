@@ -2,10 +2,12 @@
 # Purpose: SPU metric same-month QA – abnormal only, aggregated
 
 import os
+import sqlite3
 import yaml
 import pandas as pd
 
-INPUT_PATH = "qaqc_results/spu_level/normalized_raw_vendor_data.csv"
+INPUT_DB = "qaqc_results/spu_level/normalized_raw_vendor_data.sqlite"
+INPUT_TABLE = "normalized_raw_vendor_data"
 OUTPUT_PATH = "qaqc_results/spu_level/metric_same_month_result.csv"
 
 CFG_THRESHOLD = "config/benchmark_thresholds.yaml"
@@ -54,20 +56,20 @@ def run_spu_metric_same_month_checks():
     if os.path.exists(OUTPUT_PATH):
         os.remove(OUTPUT_PATH)
 
-    if not os.path.exists(INPUT_PATH):
+    if not os.path.exists(INPUT_DB):
         return
 
     # state: {(spu, month): {metric: {min, max}, vendor_groups=set()}}
     stats = {}
 
-    reader = pd.read_csv(
-        INPUT_PATH,
+    conn = sqlite3.connect(INPUT_DB)
+    reader = pd.read_sql_query(
+        f"SELECT spu_used_id, month, vendor_group, {', '.join(METRICS)} FROM {INPUT_TABLE}",
+        conn,
         chunksize=CHUNK_SIZE,
-        dtype={"spu_used_id": str, "month": str, "vendor_group": str},
-        usecols=["spu_used_id", "month", "vendor_group", *METRICS],
-        low_memory=False,
     )
 
+    processed = 0
     for chunk in reader:
         chunk = chunk.dropna(subset=["spu_used_id", "month"])
 
@@ -100,6 +102,12 @@ def run_spu_metric_same_month_checks():
                     stats[key] = {m: _init_metric_state() for m in METRICS}
                     stats[key]["vendor_groups"] = set()
                 stats[key][metric] = _update_min_max(stats[key][metric], series)
+
+        processed += len(chunk)
+        if processed and processed % 400_000 == 0:
+            print(f"[same_month] scanned {processed:,} rows ...", flush=True)
+
+    conn.close()
 
     results = []
     for (spu, month), agg in stats.items():

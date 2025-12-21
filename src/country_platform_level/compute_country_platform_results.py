@@ -7,7 +7,8 @@ import sqlite3
 import pandas as pd
 
 
-RAW_PATH = "qaqc_results/spu_level/normalized_raw_vendor_data.csv"
+RAW_DB = "qaqc_results/spu_level/normalized_raw_vendor_data.sqlite"
+RAW_TABLE = "normalized_raw_vendor_data"
 SELLER_PATH = "qaqc_results/seller_level/seller_result.csv"
 CATEGORY_PATH = "qaqc_results/category_level/category_result.csv"
 
@@ -34,15 +35,15 @@ def _build_maps_from_raw():
         "CREATE TABLE category_map (category_url TEXT PRIMARY KEY, country TEXT, platform TEXT);"
     )
 
-    reader = pd.read_csv(
-        RAW_PATH,
+    raw_conn = sqlite3.connect(RAW_DB)
+    reader = pd.read_sql_query(
+        f"SELECT seller_used_id, country, platform, source FROM {RAW_TABLE}",
+        raw_conn,
         chunksize=CHUNK_SIZE,
-        dtype=str,
-        usecols=["seller_used_id", "country", "platform", "source"],
-        low_memory=False,
     )
 
     chunk_idx = 0
+    processed = 0
     for chunk in reader:
         seller_rows = (
             chunk[["seller_used_id", "country", "platform"]]
@@ -71,6 +72,9 @@ def _build_maps_from_raw():
         chunk_idx += 1
         if chunk_idx % COMMIT_EVERY == 0:
             conn.commit()
+        processed += len(chunk)
+        if processed and processed % 300_000 == 0:
+            print(f"[country_platform] ingested {processed:,} rows ...", flush=True)
 
     conn.commit()
 
@@ -78,6 +82,7 @@ def _build_maps_from_raw():
     category_map = pd.read_sql_query("SELECT * FROM category_map", conn)
 
     conn.close()
+    raw_conn.close()
     if os.path.exists(TMP_DB):
         os.remove(TMP_DB)
 
@@ -85,7 +90,7 @@ def _build_maps_from_raw():
 
 
 def compute_country_platform_results():
-    if not os.path.exists(SELLER_PATH) or not os.path.exists(CATEGORY_PATH) or not os.path.exists(RAW_PATH):
+    if not os.path.exists(SELLER_PATH) or not os.path.exists(CATEGORY_PATH) or not os.path.exists(RAW_DB):
         return
 
     seller_map_df, category_map_df = _build_maps_from_raw()
