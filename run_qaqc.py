@@ -20,17 +20,19 @@ def _run(step_name, func):
 
 
 def run_qaqc_pipeline():
-    _run("Normalize raw vendor data", normalize_raw_vendor_data)
-    _run("SPU attribute checks", run_spu_attribute_checks)
-    _run("SPU metric same month checks", run_spu_metric_same_month_checks)
-    _run("SPU metric diff months checks", run_spu_metric_diff_months_checks)
+    try:
+        _run("Normalize raw vendor data", normalize_raw_vendor_data)
+        _run("SPU attribute checks", run_spu_attribute_checks)
+        _run("SPU metric same month checks", run_spu_metric_same_month_checks)
+        _run("SPU metric diff months checks", run_spu_metric_diff_months_checks)
 
-    _run("Seller level aggregation", compute_seller_results)
-    _run("Category level aggregation", compute_category_results)
-    _run("Country x Platform aggregation", compute_country_platform_results)
+        _run("Seller level aggregation", compute_seller_results)
+        _run("Category level aggregation", compute_category_results)
+        _run("Country x Platform aggregation", compute_country_platform_results)
 
-    _run("Build Excel report", build_excel_report)
-    cleanup_normalized_store()
+        _run("Build Excel report", build_excel_report)
+    finally:
+        cleanup_normalized_store()
 
 
 if __name__ == "__main__":
