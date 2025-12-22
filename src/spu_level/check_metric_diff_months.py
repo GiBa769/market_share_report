@@ -19,7 +19,6 @@ METRICS = ["asp", "historical_quantity", "historical_rating"]
 HIST_ALIASES = {"historical_rating": ["historical_rating", "historical_review"]}
 CUR_CHUNK_SIZE = 200_000
 HIST_CHUNK_SIZE = 200_000
-LOOKUP_CHUNK_SIZE = 200_000
 
 
 def load_yaml(p):
@@ -27,15 +26,115 @@ def load_yaml(p):
         return yaml.safe_load(f)
 
 
-def _load_spu_category_maps(conn: sqlite3.Connection):
-    spu_to_source = {}
-    source_counts = {}
+def _accumulate_means(reader, group_keys):
+    # returns dict: key -> {metric: {"sum": x, "count": n}}
+    acc = {}
+    for chunk in reader:
+        chunk = chunk.dropna(subset=list(group_keys))
+        present_metrics = [m for m in METRICS if m in chunk.columns]
+        if not present_metrics:
+            continue
 
-    reader = pd.read_sql_query(
-        f"SELECT spu_used_id, source FROM {CUR_TABLE} WHERE source IS NOT NULL",
-        conn,
-        chunksize=LOOKUP_CHUNK_SIZE,
-    )
+        for metric in present_metrics:
+            chunk[metric] = pd.to_numeric(chunk[metric], errors="coerce")
+
+        grouped = chunk.groupby(list(group_keys))[present_metrics]
+        summary = grouped.agg(["sum", "count"])
+
+        for idx, row in summary.iterrows():
+            key = idx if isinstance(idx, tuple) else (idx,)
+            if key not in acc:
+                acc[key] = {m: {"sum": 0.0, "count": 0.0} for m in METRICS}
+            for metric in METRICS:
+                acc[key][metric]["sum"] += row[(metric, "sum")]
+                acc[key][metric]["count"] += row[(metric, "count")]
+    return acc
+
+
+def _acc_to_df(acc, key_names):
+    records = []
+    for key, metrics in acc.items():
+        record = dict(zip(key_names, key))
+        for metric, stat in metrics.items():
+            if stat["count"] > 0:
+                record[metric] = stat["sum"] / stat["count"]
+            else:
+                record[metric] = pd.NA
+        records.append(record)
+    return pd.DataFrame(records)
+
+
+def _load_history_means():
+    if not os.path.isdir(HIST_DIR):
+        return pd.DataFrame()
+
+    acc = {}
+    total_rows = 0
+    for fname in os.listdir(HIST_DIR):
+        if not fname.endswith(".csv"):
+            continue
+
+        fpath = os.path.join(HIST_DIR, fname)
+        header = pd.read_csv(fpath, nrows=0)
+
+        # pick the available alias column for each metric
+        metric_cols = []
+        rename_map = {}
+        for metric in METRICS:
+            aliases = HIST_ALIASES.get(metric, [metric])
+            for col in aliases:
+                if col in header.columns:
+                    metric_cols.append(col)
+                    if col != metric:
+                        rename_map[col] = metric
+                    break
+
+        if not metric_cols:
+            continue
+
+        usecols = ["spu_used_id", *metric_cols]
+        reader = pd.read_csv(
+            fpath,
+            chunksize=HIST_CHUNK_SIZE,
+            dtype=str,
+            usecols=usecols,
+            low_memory=False,
+        )
+
+        if rename_map:
+            reader = (chunk.rename(columns=rename_map) for chunk in reader)
+
+        file_acc = _accumulate_means(reader, group_keys=["spu_used_id"])
+
+        # normalize legacy column names to canonical
+        if rename_map:
+            for key in file_acc:
+                for old, new in rename_map.items():
+                    file_acc[key][new] = file_acc[key].get(new, {"sum": 0.0, "count": 0.0})
+                    file_acc[key][new]["sum"] += file_acc[key].pop(old, {"sum": 0.0})["sum"]
+                    file_acc[key][new]["count"] += file_acc[key].pop(old, {"count": 0.0})["count"]
+
+        total_rows += sum(
+            max(v[m]["count"] for m in METRICS if m in v)
+            for v in file_acc.values()
+        )
+        print(
+            f"[diff_months] loaded history chunk from {fname}, total rows ~{int(total_rows):,} ...",
+            flush=True,
+        )
+
+        # merge file_acc into acc
+        for key, metrics in file_acc.items():
+            if key not in acc:
+                acc[key] = {m: {"sum": 0.0, "count": 0.0} for m in METRICS}
+            for metric in METRICS:
+                acc[key][metric]["sum"] += metrics[metric]["sum"]
+                acc[key][metric]["count"] += metrics[metric]["count"]
+
+    if not acc:
+        return pd.DataFrame()
+
+    return _acc_to_df(acc, key_names=["spu_used_id"])
 
     scanned = 0
     for chunk in reader:
@@ -189,9 +288,6 @@ def run_spu_metric_diff_months_checks():
         return
 
     conn = sqlite3.connect(CUR_DB)
-
-    spu_to_source, source_counts = _load_spu_category_maps(conn)
-
     cur_reader = pd.read_sql_query(
         f"SELECT spu_used_id, month, {', '.join(METRICS)} FROM {CUR_TABLE}",
         conn,
@@ -229,25 +325,6 @@ def run_spu_metric_diff_months_checks():
             hist_v = r.get(f"{m}_hist")
 
             if pd.isna(cur_v) or pd.isna(hist_v) or hist_v <= 0:
-                continue
-
-            # Skip evaluation for new/low-volume cases per config
-            spu_id = r["spu_used_id"]
-            source = spu_to_source.get(spu_id)
-            if (
-                source
-                and new_cat_min is not None
-                and new_cat_action == "pass"
-                and source_counts.get(source, 0) < new_cat_min
-            ):
-                continue
-
-            if (
-                m == "historical_quantity"
-                and low_qty_min is not None
-                and low_qty_action == "pass"
-                and hist_v < low_qty_min
-            ):
                 continue
 
             ratio_pct = float(cur_v) / float(hist_v) * 100
