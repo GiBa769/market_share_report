@@ -43,11 +43,10 @@ def load_constants():
         return yaml.safe_load(f)
 
 
-def _write_manifest(constants, input_root, source_files, total_rows):
+def _write_manifest(constants, source_files, total_rows):
     with open(RUN_MANIFEST, "w") as f:
         f.write("chunk_size=" + str(CHUNK_SIZE) + "\n")
         f.write("vendor_group_type=" + str(constants.get("vendor_group_type", {})) + "\n")
-        f.write("input_dir=" + input_root + "\n")
         f.write("source_files=" + ",".join(sorted(source_files)) + "\n")
         f.write("stored_as=sqlite\n")
         f.write("row_count=" + str(total_rows) + "\n")
@@ -65,27 +64,6 @@ def _create_indexes(conn: sqlite3.Connection):
     conn.commit()
 
 
-def _pick_input_sources():
-    """Pick the first directory that contains CSV vendor inputs.
-
-    Falls back to RAW_VENDOR_DATA_DIR, but will also look at COMPUTED_DATA_DIR
-    in case the upstream drops data there instead. Returns a tuple of (dir, csv_files).
-    """
-
-    candidates = [COMPUTED_DATA_DIR, RAW_VENDOR_DATA_DIR]
-    for d in candidates:
-        if not os.path.isdir(d):
-            continue
-
-        csv_files = sorted([f for f in os.listdir(d) if f.endswith(".csv")])
-        if csv_files:
-            return d, csv_files
-
-    raise FileNotFoundError(
-        "No CSV inputs found in data/computed_data or data/raw_vendor_data"
-    )
-
-
 def normalize_raw_vendor_data():
     constants = load_constants()
     vendor_types = constants["vendor_group_type"]
@@ -94,8 +72,6 @@ def normalize_raw_vendor_data():
     for p in [OUT_DB, RUN_MANIFEST]:
         if os.path.exists(p):
             os.remove(p)
-
-    input_dir, input_files = _pick_input_sources()
 
     conn = sqlite3.connect(OUT_DB)
     try:
@@ -107,11 +83,13 @@ def normalize_raw_vendor_data():
         total_rows = 0
         chunk_idx = 0
 
-        for fname in input_files:
-            seen_sources.append(os.path.join(os.path.basename(input_dir), fname))
+        for fname in os.listdir(RAW_VENDOR_DATA_DIR):
+            if not fname.endswith(".csv"):
+                continue
 
+            seen_sources.append(fname)
             reader = pd.read_csv(
-                os.path.join(input_dir, fname),
+                os.path.join(RAW_VENDOR_DATA_DIR, fname),
                 chunksize=CHUNK_SIZE,
                 dtype=str,
                 low_memory=False,
@@ -171,7 +149,7 @@ def normalize_raw_vendor_data():
     finally:
         conn.close()
 
-    _write_manifest(constants, os.path.basename(input_dir), seen_sources, total_rows)
+    _write_manifest(constants, seen_sources, total_rows)
 
 
 def cleanup_normalized_store():
