@@ -122,8 +122,8 @@ def _build_seller_spu_counts(spu_status_df):
         """
         SELECT s.seller_used_id, COUNT(DISTINCT s.spu_used_id) AS normal_spu
         FROM seller_spu s
-        JOIN spu_status t ON t.spu_used_id = s.spu_used_id
-        WHERE t.is_normal = 1
+        LEFT JOIN spu_status t ON t.spu_used_id = s.spu_used_id
+        WHERE COALESCE(t.is_normal, 1) = 1
         GROUP BY s.seller_used_id
         """,
         conn

@@ -114,12 +114,14 @@ def _build_category_spu_counts(spu_status_df):
         conn
     )
 
+    # SPUs absent from spu_status are implicitly normal because no FAIL rows
+    # were recorded for them. Treat NULL as 1 to keep them in coverage.
     normal_df = pd.read_sql_query(
         """
         SELECT c.category_url, COUNT(DISTINCT c.spu_used_id) AS normal_spu
         FROM category_spu c
-        JOIN spu_status t ON t.spu_used_id = c.spu_used_id
-        WHERE t.is_normal = 1
+        LEFT JOIN spu_status t ON t.spu_used_id = c.spu_used_id
+        WHERE COALESCE(t.is_normal, 1) = 1
         GROUP BY c.category_url
         """,
         conn
