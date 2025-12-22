@@ -8,10 +8,13 @@ import sqlite3
 import pandas as pd
 
 
-RAW_PATH = "qaqc_results/spu_level/normalized_raw_vendor_data.csv"
+RAW_DB = "qaqc_results/spu_level/normalized_raw_vendor_data.sqlite"
+RAW_TABLE = "normalized_raw_vendor_data"
 ATTR_PATH = "qaqc_results/spu_level/attribute_check_result.csv"
 SAME_MONTH_PATH = "qaqc_results/spu_level/metric_same_month_result.csv"
 DIFF_MONTH_PATH = "qaqc_results/spu_level/metric_diff_months_result.csv"
+
+SELLER_SCOPE_PATH = "data/scope/seller_scope.csv"
 
 OUTPUT_PATH = "qaqc_results/seller_level/seller_result.csv"
 
@@ -20,11 +23,23 @@ CFG_CONST = "config/qaqc_constants.yaml"
 
 CHUNK_SIZE = 200_000
 TMP_DB = "qaqc_results/_tmp_qaqc_seller.sqlite"
+COMMIT_EVERY = 20  # chunks
 
 
 def load_yaml(path):
     with open(path, "r") as f:
         return yaml.safe_load(f)
+
+
+def _load_scope(path: str, key: str):
+    if not os.path.exists(path):
+        return None
+
+    df = pd.read_csv(path, dtype=str, low_memory=False)
+    if key not in df.columns:
+        raise ValueError(f"Scope file {path} missing required column '{key}'")
+
+    return df.dropna(subset=[key]).drop_duplicates(subset=[key])
 
 
 def _load_checks_minimal():
@@ -77,14 +92,15 @@ def _build_seller_spu_counts(spu_status_df):
 
     conn.commit()
 
-    reader = pd.read_csv(
-        RAW_PATH,
+    raw_conn = sqlite3.connect(RAW_DB)
+    reader = pd.read_sql_query(
+        f"SELECT seller_used_id, spu_used_id FROM {RAW_TABLE}",
+        raw_conn,
         chunksize=CHUNK_SIZE,
-        dtype=str,
-        usecols=["seller_used_id", "spu_used_id"],
-        low_memory=False,
     )
 
+    chunk_idx = 0
+    processed = 0
     for chunk in reader:
         pairs = chunk.dropna(subset=["seller_used_id", "spu_used_id"]).drop_duplicates()
         if pairs.empty:
@@ -93,7 +109,16 @@ def _build_seller_spu_counts(spu_status_df):
             "INSERT INTO seller_spu(seller_used_id, spu_used_id) VALUES(?, ?);",
             list(pairs.itertuples(index=False, name=None))
         )
-        conn.commit()
+        chunk_idx += 1
+        if chunk_idx % COMMIT_EVERY == 0:
+            conn.commit()
+        processed += len(chunk)
+        if processed and processed % 300_000 == 0:
+            print(f"[seller] ingested {processed:,} rows ...", flush=True)
+
+    raw_conn.close()
+
+    conn.commit()
 
     # total distinct spu per seller
     total_df = pd.read_sql_query(
@@ -110,8 +135,8 @@ def _build_seller_spu_counts(spu_status_df):
         """
         SELECT s.seller_used_id, COUNT(DISTINCT s.spu_used_id) AS normal_spu
         FROM seller_spu s
-        JOIN spu_status t ON t.spu_used_id = s.spu_used_id
-        WHERE t.is_normal = 1
+        LEFT JOIN spu_status t ON t.spu_used_id = s.spu_used_id
+        WHERE COALESCE(t.is_normal, 1) = 1
         GROUP BY s.seller_used_id
         """,
         conn
@@ -130,9 +155,9 @@ def compute_seller_results():
 
     status = constants["check_result"]
 
-    pass_min_pct = thresholds["seller_level"]["pass_min_pct"]
+    pass_min_pct = thresholds["seller_level"]["spu_coverage_ratio"]["pass_min_pct"]
 
-    if not os.path.exists(RAW_PATH):
+    if not os.path.exists(RAW_DB):
         return
 
     spu_status = _load_checks_minimal()
@@ -141,13 +166,63 @@ def compute_seller_results():
 
     summary = total_df.merge(normal_df, on="seller_used_id", how="left").fillna(0)
 
-    summary["coverage_pct"] = summary["normal_spu"] / summary["total_spu"] * 100
-    summary["seller_result"] = summary["coverage_pct"].apply(
-        lambda x: status["pass"] if x >= pass_min_pct else status["fail"]
+    summary["coverage_pct"] = summary.apply(
+        lambda r: (r["normal_spu"] / r["total_spu"] * 100) if r["total_spu"] else 0.0,
+        axis=1,
+    )
+    summary["seller_result"] = summary.apply(
+        lambda r: status["pass"]
+        if r["total_spu"] and r["coverage_pct"] >= pass_min_pct
+        else (status["fail"] if r["total_spu"] else status["skipped"]),
+        axis=1,
     )
 
+    scope_df = _load_scope(SELLER_SCOPE_PATH, key="seller_used_id")
+    if scope_df is not None:
+        base = scope_df.copy()
+        base["scope_status"] = "in_scope"
+
+        merged = base.merge(summary, on="seller_used_id", how="left")
+        merged[["total_spu", "normal_spu"]] = merged[["total_spu", "normal_spu"]].fillna(0)
+        merged["coverage_pct"] = merged.apply(
+            lambda r: (r["normal_spu"] / r["total_spu"] * 100) if r["total_spu"] else 0.0,
+            axis=1,
+        )
+        merged["seller_result"] = merged.apply(
+            lambda r: status["pass"]
+            if r["total_spu"] and r["coverage_pct"] >= pass_min_pct
+            else (status["fail"] if r["total_spu"] else status["skipped"]),
+            axis=1,
+        )
+
+        merged.loc[merged["total_spu"] == 0, "scope_status"] = "missed"
+
+        extras = summary.loc[~summary["seller_used_id"].isin(base["seller_used_id"])].copy()
+        if not extras.empty:
+            extras["scope_status"] = "extra"
+        merged = pd.concat([merged, extras], ignore_index=True, sort=False)
+    else:
+        summary["scope_status"] = "in_scope"
+        merged = summary
+
     os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
-    summary.to_csv(OUTPUT_PATH, index=False)
+
+    # Keep scope columns (when present) and computed metrics in the final layout
+    ordered_cols = []
+    if scope_df is not None:
+        ordered_cols.extend([c for c in scope_df.columns if c != "seller_used_id"])
+    for c in [
+        "seller_used_id",
+        "total_spu",
+        "normal_spu",
+        "coverage_pct",
+        "seller_result",
+        "scope_status",
+    ]:
+        if c not in ordered_cols:
+            ordered_cols.append(c)
+
+    merged[ordered_cols].to_csv(OUTPUT_PATH, index=False)
 
 
 if __name__ == "__main__":
