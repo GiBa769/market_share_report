@@ -3,16 +3,18 @@
 # Strategy: record FAIL only, no row-level attribute dump
 
 import os
+import sqlite3
 import pandas as pd
 
-RAW_PATH = "qaqc_results/spu_level/normalized_raw_vendor_data.csv"
+RAW_DB = "qaqc_results/spu_level/normalized_raw_vendor_data.sqlite"
+RAW_TABLE = "normalized_raw_vendor_data"
 OUTPUT_PATH = "qaqc_results/spu_level/attribute_check_result.csv"
 
 CHUNK_SIZE = 200_000
 
 
 def run_spu_attribute_checks():
-    if not os.path.exists(RAW_PATH):
+    if not os.path.exists(RAW_DB):
         return
 
     if os.path.exists(OUTPUT_PATH):
@@ -20,13 +22,14 @@ def run_spu_attribute_checks():
 
     failed_spu = set()
 
-    reader = pd.read_csv(
-        RAW_PATH,
+    conn = sqlite3.connect(RAW_DB)
+    reader = pd.read_sql_query(
+        f"SELECT spu_used_id, spu_name, spu_url FROM {RAW_TABLE}",
+        conn,
         chunksize=CHUNK_SIZE,
-        dtype=str,
-        low_memory=False,
     )
 
+    processed = 0
     for chunk in reader:
         # attribute rules (example – giữ đúng tinh thần file cũ)
         invalid = chunk[
@@ -36,9 +39,17 @@ def run_spu_attribute_checks():
         ]
 
         if invalid.empty:
+            processed += len(chunk)
+            if processed and processed % 500_000 == 0:
+                print(f"[attributes] scanned {processed:,} rows ...", flush=True)
             continue
 
         failed_spu.update(invalid["spu_used_id"].dropna().unique())
+        processed += len(chunk)
+        if processed and processed % 500_000 == 0:
+            print(f"[attributes] scanned {processed:,} rows ...", flush=True)
+
+    conn.close()
 
     if not failed_spu:
         return
