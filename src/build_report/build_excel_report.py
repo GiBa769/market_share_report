@@ -33,7 +33,6 @@ def _select_engine() -> str:
 
 def build_excel_report():
     engine = _select_engine()
-    os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
     with pd.ExcelWriter(OUT_PATH, engine=engine) as writer:
         for sheet, path in FILES.items():
             if not os.path.exists(path):

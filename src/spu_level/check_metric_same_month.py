@@ -78,7 +78,7 @@ def _build_scan_query():
     SELECT {select_sql}
     FROM tmp_same_month_vendor_cnt v
     {join_sql}
-    -- Evaluate every spu-month pair; vendor_group_count is kept for context only
+    WHERE v.vendor_group_count >= 2;
     """
 
 
@@ -94,16 +94,6 @@ def run_spu_metric_same_month_checks():
         os.remove(OUTPUT_PATH)
 
     if not os.path.exists(INPUT_DB):
-        pd.DataFrame(
-            columns=[
-                "spu_used_id",
-                "month",
-                "metric_name",
-                "vendor_group_count",
-                "ratio_pct",
-                "check_result",
-            ]
-        ).to_csv(OUTPUT_PATH, index=False)
         return
 
     conn = sqlite3.connect(INPUT_DB)
@@ -157,18 +147,8 @@ def run_spu_metric_same_month_checks():
                         flush=True,
                     )
 
-        if not header_written:
-            pd.DataFrame(
-                columns=[
-                    "spu_used_id",
-                    "month",
-                    "metric_name",
-                    "vendor_group_count",
-                    "ratio_pct",
-                    "check_result",
-                ]
-            ).to_csv(OUTPUT_PATH, index=False)
-            print("[same_month] no failures found", flush=True)
+        if not header_written and os.path.exists(OUTPUT_PATH):
+            os.remove(OUTPUT_PATH)
     finally:
         conn.close()
 

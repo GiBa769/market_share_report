@@ -14,7 +14,8 @@ CHUNK_SIZE = 200_000
 
 
 def run_spu_attribute_checks():
-    os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
+    if not os.path.exists(RAW_DB):
+        return
 
     if not os.path.exists(RAW_DB):
         pd.DataFrame(columns=["spu_used_id", "check_result"]).to_csv(
