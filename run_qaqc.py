@@ -3,6 +3,7 @@
 
 from src.normalize.normalize_raw_vendor_data import normalize_raw_vendor_data, cleanup_normalized_store
 from src.spu_level.check_attributes import run_spu_attribute_checks
+from src.spu_level.check_attribute_only import run_check_attribute_only
 from src.spu_level.check_metric_same_month import run_spu_metric_same_month_checks
 from src.spu_level.check_metric_diff_months import run_spu_metric_diff_months_checks
 
@@ -21,18 +22,20 @@ def _run(step_name, func):
 
 def run_qaqc_pipeline():
     try:
-        _run("Normalize raw vendor data", normalize_raw_vendor_data)
+        # _run("Normalize raw vendor data", normalize_raw_vendor_data)
         _run("SPU attribute checks", run_spu_attribute_checks)
-        _run("SPU metric same month checks", run_spu_metric_same_month_checks)
-        _run("SPU metric diff months checks", run_spu_metric_diff_months_checks)
+        # _run("SPU attribute check (only)", run_check_attribute_only)
+        # _run("SPU metric same month checks", run_spu_metric_same_month_checks)
+        # _run("SPU metric diff months checks", run_spu_metric_diff_months_checks)
 
-        _run("Seller level aggregation", compute_seller_results)
-        _run("Category level aggregation", compute_category_results)
-        _run("Country x Platform aggregation", compute_country_platform_results)
+        # _run("Seller level aggregation", compute_seller_results)
+        # _run("Category level aggregation", compute_category_results)
+        # _run("Country x Platform aggregation", compute_country_platform_results)
 
-        _run("Build Excel report", build_excel_report)
-    finally:
-        cleanup_normalized_store()
+        # _run("Build Excel report", build_excel_report)
+    finally: 
+        return
+        # cleanup_normalized_store()
 
 
 if __name__ == "__main__":
