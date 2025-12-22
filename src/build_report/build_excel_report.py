@@ -5,7 +5,7 @@ import importlib.util
 import os
 import pandas as pd
 
-OUT_PATH = "qaqc_results/QAQC_Market_Share_Report.xlsx"
+OUT_PATH = "qaqc_report/QAQC_Market_Share_Report.xlsx"
 
 FILES = {
     "Country_Platform": "qaqc_results/country_platform_level/country_platform_result.csv",
