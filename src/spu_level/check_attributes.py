@@ -17,8 +17,11 @@ def run_spu_attribute_checks():
     if not os.path.exists(RAW_DB):
         return
 
-    if os.path.exists(OUTPUT_PATH):
-        os.remove(OUTPUT_PATH)
+    if not os.path.exists(RAW_DB):
+        pd.DataFrame(columns=["spu_used_id", "check_result"]).to_csv(
+            OUTPUT_PATH, index=False
+        )
+        return
 
     failed_spu = set()
 
@@ -52,6 +55,9 @@ def run_spu_attribute_checks():
     conn.close()
 
     if not failed_spu:
+        pd.DataFrame(columns=["spu_used_id", "check_result"]).to_csv(
+            OUTPUT_PATH, index=False
+        )
         return
 
     result_df = pd.DataFrame({

@@ -14,6 +14,8 @@ ATTR_PATH = "qaqc_results/spu_level/attribute_check_result.csv"
 SAME_MONTH_PATH = "qaqc_results/spu_level/metric_same_month_result.csv"
 DIFF_MONTH_PATH = "qaqc_results/spu_level/metric_diff_months_result.csv"
 
+SELLER_SCOPE_PATH = "data/scope/seller_scope.csv"
+
 OUTPUT_PATH = "qaqc_results/seller_level/seller_result.csv"
 
 CFG_THRESHOLD = "config/benchmark_thresholds.yaml"
@@ -27,6 +29,17 @@ COMMIT_EVERY = 20  # chunks
 def load_yaml(path):
     with open(path, "r") as f:
         return yaml.safe_load(f)
+
+
+def _load_scope(path: str, key: str):
+    if not os.path.exists(path):
+        return None
+
+    df = pd.read_csv(path, dtype=str, low_memory=False)
+    if key not in df.columns:
+        raise ValueError(f"Scope file {path} missing required column '{key}'")
+
+    return df.dropna(subset=[key]).drop_duplicates(subset=[key])
 
 
 def _load_checks_minimal():
@@ -153,13 +166,63 @@ def compute_seller_results():
 
     summary = total_df.merge(normal_df, on="seller_used_id", how="left").fillna(0)
 
-    summary["coverage_pct"] = summary["normal_spu"] / summary["total_spu"] * 100
-    summary["seller_result"] = summary["coverage_pct"].apply(
-        lambda x: status["pass"] if x >= pass_min_pct else status["fail"]
+    summary["coverage_pct"] = summary.apply(
+        lambda r: (r["normal_spu"] / r["total_spu"] * 100) if r["total_spu"] else 0.0,
+        axis=1,
+    )
+    summary["seller_result"] = summary.apply(
+        lambda r: status["pass"]
+        if r["total_spu"] and r["coverage_pct"] >= pass_min_pct
+        else (status["fail"] if r["total_spu"] else status["skipped"]),
+        axis=1,
     )
 
+    scope_df = _load_scope(SELLER_SCOPE_PATH, key="seller_used_id")
+    if scope_df is not None:
+        base = scope_df.copy()
+        base["scope_status"] = "in_scope"
+
+        merged = base.merge(summary, on="seller_used_id", how="left")
+        merged[["total_spu", "normal_spu"]] = merged[["total_spu", "normal_spu"]].fillna(0)
+        merged["coverage_pct"] = merged.apply(
+            lambda r: (r["normal_spu"] / r["total_spu"] * 100) if r["total_spu"] else 0.0,
+            axis=1,
+        )
+        merged["seller_result"] = merged.apply(
+            lambda r: status["pass"]
+            if r["total_spu"] and r["coverage_pct"] >= pass_min_pct
+            else (status["fail"] if r["total_spu"] else status["skipped"]),
+            axis=1,
+        )
+
+        merged.loc[merged["total_spu"] == 0, "scope_status"] = "missed"
+
+        extras = summary.loc[~summary["seller_used_id"].isin(base["seller_used_id"])].copy()
+        if not extras.empty:
+            extras["scope_status"] = "extra"
+        merged = pd.concat([merged, extras], ignore_index=True, sort=False)
+    else:
+        summary["scope_status"] = "in_scope"
+        merged = summary
+
     os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
-    summary.to_csv(OUTPUT_PATH, index=False)
+
+    # Keep scope columns (when present) and computed metrics in the final layout
+    ordered_cols = []
+    if scope_df is not None:
+        ordered_cols.extend([c for c in scope_df.columns if c != "seller_used_id"])
+    for c in [
+        "seller_used_id",
+        "total_spu",
+        "normal_spu",
+        "coverage_pct",
+        "seller_result",
+        "scope_status",
+    ]:
+        if c not in ordered_cols:
+            ordered_cols.append(c)
+
+    merged[ordered_cols].to_csv(OUTPUT_PATH, index=False)
 
 
 if __name__ == "__main__":
