@@ -8,6 +8,7 @@ import yaml
 import pandas as pd
 
 RAW_VENDOR_DATA_DIR = "data/raw_vendor_data"
+COMPUTED_DATA_DIR = "data/computed_data"
 
 OUT_DIR = "qaqc_results/spu_level"
 OUT_DB = f"{OUT_DIR}/normalized_raw_vendor_data.sqlite"

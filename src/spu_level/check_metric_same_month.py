@@ -89,6 +89,7 @@ def run_spu_metric_same_month_checks():
     status = constants["check_result"]
     cfg = thresholds["spu_metric"]["same_month"]
 
+    os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
     if os.path.exists(OUTPUT_PATH):
         os.remove(OUTPUT_PATH)
 

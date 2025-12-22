@@ -9,6 +9,7 @@ import pandas as pd
 CUR_DB = "qaqc_results/spu_level/normalized_raw_vendor_data.sqlite"
 CUR_TABLE = "normalized_raw_vendor_data"
 HIST_DIR = "data/computed_data"
+RAW_VENDOR_DIR = "data/raw_vendor_data"
 OUTPUT_PATH = "qaqc_results/spu_level/metric_diff_months_result.csv"
 
 CFG_THRESHOLD = "config/benchmark_thresholds.yaml"
@@ -398,6 +399,147 @@ def _load_history_means():
 
     return _acc_to_df(acc, key_names=["spu_used_id"])
 
+    scanned = 0
+    for chunk in reader:
+        chunk = chunk.dropna(subset=["spu_used_id", "source"]).drop_duplicates(
+            subset=["spu_used_id", "source"]
+        )
+        scanned += len(chunk)
+
+        for row in chunk.itertuples(index=False):
+            if row.spu_used_id not in spu_to_source:
+                spu_to_source[row.spu_used_id] = row.source
+            source_counts[row.source] = source_counts.get(row.source, 0) + 1
+
+        if scanned and scanned % 400_000 == 0:
+            print(
+                f"[diff_months] mapped {scanned:,} category links ...",
+                flush=True,
+            )
+
+    return spu_to_source, source_counts
+
+
+def _accumulate_means(reader, group_keys):
+    # returns dict: key -> {metric: {"sum": x, "count": n}}
+    acc = {}
+    for chunk in reader:
+        chunk = chunk.dropna(subset=list(group_keys))
+        present_metrics = [m for m in METRICS if m in chunk.columns]
+        if not present_metrics:
+            continue
+
+        for metric in present_metrics:
+            chunk[metric] = pd.to_numeric(chunk[metric], errors="coerce")
+
+        grouped = chunk.groupby(list(group_keys))[present_metrics]
+        summary = grouped.agg(["sum", "count"])
+
+        for idx, row in summary.iterrows():
+            key = idx if isinstance(idx, tuple) else (idx,)
+            if key not in acc:
+                acc[key] = {m: {"sum": 0.0, "count": 0.0} for m in METRICS}
+            for metric in METRICS:
+                acc[key][metric]["sum"] += row[(metric, "sum")]
+                acc[key][metric]["count"] += row[(metric, "count")]
+    return acc
+
+
+def _acc_to_df(acc, key_names):
+    records = []
+    for key, metrics in acc.items():
+        record = dict(zip(key_names, key))
+        for metric, stat in metrics.items():
+            if stat["count"] > 0:
+                record[metric] = stat["sum"] / stat["count"]
+            else:
+                record[metric] = pd.NA
+        records.append(record)
+    return pd.DataFrame(records)
+
+
+def _pick_history_dir():
+    """Pick a history directory that actually contains CSV files."""
+
+    for d in [HIST_DIR, RAW_VENDOR_DIR]:
+        if not os.path.isdir(d):
+            continue
+        csvs = [f for f in os.listdir(d) if f.endswith(".csv")]
+        if csvs:
+            return d, sorted(csvs)
+    return None, []
+
+
+def _load_history_means():
+    hist_dir, hist_files = _pick_history_dir()
+    if not hist_dir:
+        return pd.DataFrame()
+
+    acc = {}
+    total_rows = 0
+    for fname in hist_files:
+        fpath = os.path.join(hist_dir, fname)
+        header = pd.read_csv(fpath, nrows=0)
+
+        # pick the available alias column for each metric
+        metric_cols = []
+        rename_map = {}
+        for metric in METRICS:
+            aliases = HIST_ALIASES.get(metric, [metric])
+            for col in aliases:
+                if col in header.columns:
+                    metric_cols.append(col)
+                    if col != metric:
+                        rename_map[col] = metric
+                    break
+
+        if not metric_cols:
+            continue
+
+        usecols = ["spu_used_id", *metric_cols]
+        reader = pd.read_csv(
+            fpath,
+            chunksize=HIST_CHUNK_SIZE,
+            dtype=str,
+            usecols=usecols,
+            low_memory=False,
+        )
+
+        if rename_map:
+            reader = (chunk.rename(columns=rename_map) for chunk in reader)
+
+        file_acc = _accumulate_means(reader, group_keys=["spu_used_id"])
+
+        # normalize legacy column names to canonical
+        if rename_map:
+            for key in file_acc:
+                for old, new in rename_map.items():
+                    file_acc[key][new] = file_acc[key].get(new, {"sum": 0.0, "count": 0.0})
+                    file_acc[key][new]["sum"] += file_acc[key].pop(old, {"sum": 0.0})["sum"]
+                    file_acc[key][new]["count"] += file_acc[key].pop(old, {"count": 0.0})["count"]
+
+        total_rows += sum(
+            max(v[m]["count"] for m in METRICS if m in v)
+            for v in file_acc.values()
+        )
+        print(
+            f"[diff_months] loaded history chunk from {fname}, total rows ~{int(total_rows):,} ...",
+            flush=True,
+        )
+
+        # merge file_acc into acc
+        for key, metrics in file_acc.items():
+            if key not in acc:
+                acc[key] = {m: {"sum": 0.0, "count": 0.0} for m in METRICS}
+            for metric in METRICS:
+                acc[key][metric]["sum"] += metrics[metric]["sum"]
+                acc[key][metric]["count"] += metrics[metric]["count"]
+
+    if not acc:
+        return pd.DataFrame()
+
+    return _acc_to_df(acc, key_names=["spu_used_id"])
+
 
 def run_spu_metric_diff_months_checks():
     thresholds = load_yaml(CFG_THRESHOLD)
@@ -412,6 +554,7 @@ def run_spu_metric_diff_months_checks():
         "new_category_condition", {}
     )
 
+    os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
     if os.path.exists(OUTPUT_PATH):
         os.remove(OUTPUT_PATH)
 
