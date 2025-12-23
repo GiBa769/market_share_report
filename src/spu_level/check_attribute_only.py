@@ -105,20 +105,18 @@ def run_check_attribute_only():
 
     print(f"[DEBUG] Rows loaded for month {TARGET_MONTH}: {len(df)}")
 
+    # =================================================
+    # ISSUE COLLECTION (FAIL ONLY)
+    # =================================================
     issues = []
 
-    # =================================================
-    # GROUP BY SPU
-    # =================================================
     for spu_used_id, g in df.groupby("spu_used_id"):
 
         total_rows = len(g)
         seller_used_ids = g["seller_used_id"].dropna().unique().tolist()
         seller_used_id = seller_used_ids[0] if seller_used_ids else None
 
-        # ---------------------------------------------
-        # CHECK 1: SINGLE-LINE (only when exactly 1 row)
-        # ---------------------------------------------
+        # ---------- single_line check ----------
         if total_rows == 1:
             row = g.iloc[0]
 
@@ -151,9 +149,7 @@ def run_check_attribute_only():
                     "status": "Fail",
                 })
 
-        # ---------------------------------------------
-        # CHECK 2: MULTI-LINES (only when >= 2 rows)
-        # ---------------------------------------------
+        # ---------- multi_lines check ----------
         if total_rows >= 2:
             signatures = g.apply(build_row_signature, axis=1).tolist()
             counter = Counter(signatures)
@@ -173,15 +169,67 @@ def run_check_attribute_only():
                 })
 
     # =================================================
-    # EXPORT
+    # BUILD RESULT DF (FAIL LIST)
     # =================================================
     result_df = pd.DataFrame(issues)
 
+    # =================================================
+    # GLOBAL SUMMARY (ONE ROW ONLY)
+    # =================================================
+    total_spu = df["spu_used_id"].nunique()
+
+    failed_spu_set = set(result_df["spu_used_id"]) if not result_df.empty else set()
+    failed_spu = len(failed_spu_set)
+    normal_spu = total_spu - failed_spu
+    normal_rate = round(normal_spu / total_spu, 4) if total_spu else 0
+
+    failed_spu_single_line = len(
+        {r["spu_used_id"] for r in issues if r["check_type"] == "single_line"}
+    )
+    failed_spu_multi_lines = len(
+        {r["spu_used_id"] for r in issues if r["check_type"] == "multi_lines"}
+    )
+
+    issue_type_counter = Counter(
+        r["issue_type"] for r in issues
+    )
+
+    failed_spu_by_issue_type = ";".join(
+        f"{k}={v}" for k, v in issue_type_counter.items()
+    )
+
+    summary_values = {
+        "total_spu": total_spu,
+        "failed_spu": failed_spu,
+        "normal_spu": normal_spu,
+        "normal_rate": normal_rate,
+        "failed_spu_single_line": failed_spu_single_line,
+        "failed_spu_multi_lines": failed_spu_multi_lines,
+        "failed_spu_by_issue_type": failed_spu_by_issue_type,
+    }
+
+    # append summary columns (empty by default)
+    for col in summary_values:
+        result_df[col] = ""
+
+    # fill summary in FIRST ROW ONLY
+    if not result_df.empty:
+        for col, val in summary_values.items():
+            result_df.at[0, col] = val
+
+    # =================================================
+    # EXPORT
+    # =================================================
     os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
     result_df.to_csv(OUTPUT_PATH, index=False)
 
     print(f"✅ Output written to: {OUTPUT_PATH}")
-    print(f"Total issues detected: {len(result_df)}")
+    print(
+        f"[SUMMARY] total_spu={total_spu}, "
+        f"failed_spu={failed_spu}, "
+        f"normal_spu={normal_spu}, "
+        f"normal_rate={normal_rate}"
+    )
 
 
 # =====================================================

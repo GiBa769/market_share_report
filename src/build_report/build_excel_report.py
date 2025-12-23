@@ -5,12 +5,15 @@ import importlib.util
 import os
 import pandas as pd
 
-OUT_PATH = "qaqc_report/QAQC_Market_Share_Report.xlsx"
+OUT_PATH = "qaqc_report/QAQC_Vendor_Data_Report.xlsx"
 
 FILES = {
-    "Country_Platform": "qaqc_results/country_platform_level/country_platform_result.csv",
-    "Seller": "qaqc_results/seller_level/seller_result.csv",
-    "Category": "qaqc_results/category_level/category_result.csv",
+    "Country_Platform": "qaqc_results/country_platform_level/check_country_platform_level.csv",
+    "Seller": "qaqc_results/seller_level/check_seller_level.csv",
+    "Category": "qaqc_results/category_level/check_category_url_level.csv",
+    "SPU_Attribute_Check": "qaqc_results/spu_level/spu_attribute_check_only.csv",
+    "SPU_Metric_Same_Month": "qaqc_results/spu_level/spu_metric_same_month_only.csv",
+    "SPU_Metric_Diff_Months": "qaqc_results/spu_level/spu_metric_diff_months_only.csv",
 }
 
 
