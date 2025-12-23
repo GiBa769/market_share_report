@@ -1,51 +1,119 @@
 import os
 import sqlite3
 import pandas as pd
-import numpy as np
+from collections import Counter
 
 # =========================
-# CONFIG (EXPLICIT, NO MAGIC)
+# CONFIG
 # =========================
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 DB_PATH = os.path.join(
-    BASE_DIR,
-    "qaqc_results",
-    "spu_level",
-    "normalized_raw_vendor_data.sqlite",
+    BASE_DIR, "qaqc_results", "spu_level", "normalized_raw_vendor_data.sqlite"
 )
-
 DB_TABLE = "normalized_raw_vendor_data"
-
-SELLER_SCOPE_PATH = os.path.join(
-    BASE_DIR,
-    "data",
-    "scope",
-    "Seller_in_scope.csv",
-)
 
 CURRENT_MONTH = "2025-12"
 PAST_N_MONTHS = 3
 
+# Seller quality (Y)
 SELLER_NORMAL_THRESHOLD = 0.95
 
+# Trending (X)
 TREND_MIN_AVG = 10
 TREND_RATIO_MIN = 0.8
 TREND_RATIO_MAX = 2.0
 
-OUTPUT_PATH = os.path.join(
-    BASE_DIR,
-    "qaqc_results",
-    "seller_level",
-    "check_seller_level.csv",
+# SPU abnormal threshold (K)
+SPU_ABNORMAL_THRESHOLD = 1
+
+# Scope
+SELLER_SCOPE_PATH = os.path.join(
+    BASE_DIR, "data", "scope", "Seller_in_scope.csv"
 )
 
+# SPU-level result files
 SPU_RESULT_FILES = {
     "attribute": os.path.join(BASE_DIR, "qaqc_results", "spu_level", "spu_attribute_check_only.csv"),
-    "metric_same": os.path.join(BASE_DIR, "qaqc_results", "spu_level", "spu_metric_same_month_only.csv"),
-    "metric_diff": os.path.join(BASE_DIR, "qaqc_results", "spu_level", "spu_metric_diff_months_only.csv"),
+    "same_month": os.path.join(BASE_DIR, "qaqc_results", "spu_level", "spu_metric_same_month_only.csv"),
+    "diff_months": os.path.join(BASE_DIR, "qaqc_results", "spu_level", "spu_metric_diff_months_only.csv"),
 }
+
+OUTPUT_PATH = os.path.join(
+    BASE_DIR, "qaqc_results", "seller_level", "check_seller_level.csv"
+)
+
+# =========================
+# HELPERS
+# =========================
+
+def load_failed_spu_counts(path: str) -> Counter:
+    """
+    Count failed checks per SPU following the FINAL rule:
+    - attribute / same_month: all rows are failed
+    - diff_months:
+        - issue_type = abnormal  -> failed
+        - issue_type = insufficient_history AND status = Fail -> failed
+        - insufficient_history + Pass -> NOT failed
+    """
+    cnt = Counter()
+
+    if not os.path.exists(path):
+        return cnt
+
+    df = pd.read_csv(path)
+    if "spu_used_id" not in df.columns:
+        return cnt
+
+    fname = os.path.basename(path).lower()
+
+    # Attribute & same month: issue list only
+    if "attribute" in fname or "same_month" in fname:
+        for spu in df["spu_used_id"].dropna().astype(str):
+            cnt[spu] += 1
+        return cnt
+
+    # Diff months
+    if "diff_months" in fname and "issue_type" in df.columns:
+        issue = df["issue_type"].astype(str).str.lower()
+
+        abnormal = issue == "abnormal"
+        insuf_fail = (
+            (issue == "insufficient_history")
+            & ("status" in df.columns)
+            & (df["status"].astype(str).str.lower() == "fail")
+        )
+
+        df2 = df[abnormal | insuf_fail]
+        for spu in df2["spu_used_id"].dropna().astype(str):
+            cnt[spu] += 1
+        return cnt
+
+    # Fallback
+    for spu in df["spu_used_id"].dropna().astype(str):
+        cnt[spu] += 1
+    return cnt
+
+
+def load_all_failed_spu_counts() -> Counter:
+    total = Counter()
+    for p in SPU_RESULT_FILES.values():
+        total += load_failed_spu_counts(p)
+    return total
+
+
+def trend_status(current_spu: int, avg_spu: float):
+    if avg_spu < TREND_MIN_AVG:
+        return "Normal", ""
+
+    if avg_spu <= 0:
+        return "Abnormal", ""
+
+    ratio = current_spu / avg_spu
+    status = "Normal" if TREND_RATIO_MIN <= ratio <= TREND_RATIO_MAX else "Abnormal"
+    return status, round(ratio, 6)
+
 
 # =========================
 # MAIN
@@ -53,42 +121,19 @@ SPU_RESULT_FILES = {
 
 def run_check_seller_level():
 
-    # ---------- Load seller scope (NO NORMALIZATION) ----------
-    seller_scope = pd.read_csv(SELLER_SCOPE_PATH)
-    required_cols = ["country", "platform", "seller_used_id", "seller_url", "seller_name"]
-    for c in required_cols:
-        if c not in seller_scope.columns:
-            raise ValueError(f"Seller_in_scope.csv missing column: {c}")
+    # ---------- Load scope ----------
+    scope_df = pd.read_csv(SELLER_SCOPE_PATH)
+    scope_sellers = set(scope_df["seller_used_id"].astype(str))
 
-    seller_scope["seller_used_id"] = seller_scope["seller_used_id"].astype(str).str.strip()
-    seller_scope = seller_scope[seller_scope["seller_used_id"] != ""]
-    seller_scope = seller_scope.drop_duplicates(subset=["seller_used_id"])
+    # ---------- Load failed SPU counts ----------
+    failed_spu_counts = load_all_failed_spu_counts()
 
-    scope_sellers = set(seller_scope["seller_used_id"])
-
-    # ---------- Load SPU abnormal lists (8 checks total) ----------
-    spu_abnormal = set()
-
-    for path in SPU_RESULT_FILES.values():
-        if not os.path.exists(path):
-            continue
-
-        df = pd.read_csv(path)
-
-        if "issue_type" in df.columns:
-            df = df[df["issue_type"].astype(str).str.lower() == "abnormal"]
-
-        if "spu_used_id" in df.columns:
-            spu_abnormal.update(df["spu_used_id"].dropna().astype(str))
-
-    # ---------- Load current month SPU ----------
+    # ---------- Load SQLite ----------
     conn = sqlite3.connect(DB_PATH)
 
     df_cur = pd.read_sql(
         f"""
-        SELECT
-            seller_used_id,
-            spu_used_id
+        SELECT seller_used_id, country, platform, spu_used_id
         FROM {DB_TABLE}
         WHERE month = ?
         """,
@@ -96,16 +141,9 @@ def run_check_seller_level():
         params=(CURRENT_MONTH,),
     )
 
-    df_cur["seller_used_id"] = df_cur["seller_used_id"].astype(str)
-    df_cur["spu_used_id"] = df_cur["spu_used_id"].astype(str)
-
-    # ---------- Past months SPU count ----------
     df_past = pd.read_sql(
         f"""
-        SELECT
-            seller_used_id,
-            month,
-            COUNT(DISTINCT spu_used_id) AS spu_cnt
+        SELECT seller_used_id, month, COUNT(DISTINCT spu_used_id) AS spu_cnt
         FROM {DB_TABLE}
         WHERE month < ?
         GROUP BY seller_used_id, month
@@ -116,89 +154,95 @@ def run_check_seller_level():
 
     conn.close()
 
-    # ---------- Aggregate ----------
-    results = []
+    df_cur["seller_used_id"] = df_cur["seller_used_id"].astype(str)
+    df_cur["spu_used_id"] = df_cur["spu_used_id"].astype(str)
+
+    # ---------- Aggregate seller ----------
+    rows = []
 
     for seller_id, g in df_cur.groupby("seller_used_id"):
+
+        country = g["country"].iloc[0]
+        platform = g["platform"].iloc[0]
 
         spu_set = set(g["spu_used_id"])
         total_spu = len(spu_set)
 
-        failed_spu = spu_set & spu_abnormal
-        failed_cnt = len(failed_spu)
+        abnormal_spu = {
+            spu for spu in spu_set
+            if failed_spu_counts.get(spu, 0) >= SPU_ABNORMAL_THRESHOLD
+        }
 
-        normal_cnt = total_spu - failed_cnt
-        normal_rate = normal_cnt / total_spu if total_spu > 0 else 0
+        abnormal_cnt = len(abnormal_spu)
+        normal_cnt = total_spu - abnormal_cnt
+        normal_rate = normal_cnt / total_spu if total_spu else 0
 
-        status = "Normal" if normal_rate >= SELLER_NORMAL_THRESHOLD else "Abnormal"
+        y_status = "Normal" if normal_rate >= SELLER_NORMAL_THRESHOLD else "Abnormal"
 
-        # ---------- Trending ----------
         past = df_past[df_past["seller_used_id"] == seller_id].sort_values("month")
         last_n = past.tail(PAST_N_MONTHS)
-
         avg_spu = last_n["spu_cnt"].mean() if not last_n.empty else 0
 
-        if avg_spu < TREND_MIN_AVG:
-            trend_status = "Normal"
-            trend_ratio = ""
-        else:
-            ratio = total_spu / avg_spu if avg_spu > 0 else 0
-            trend_ratio = round(ratio, 4)
-            trend_status = (
-                "Normal"
-                if TREND_RATIO_MIN <= ratio <= TREND_RATIO_MAX
-                else "Abnormal"
-            )
+        trend_stat, trend_ratio = trend_status(total_spu, avg_spu)
 
-        results.append({
+        seller_status = (
+            "Normal" if (y_status == "Normal" and trend_stat == "Normal") else "Abnormal"
+        )
+
+        rows.append({
             "seller_used_id": seller_id,
+            "country": country,
+            "platform": platform,
             "seller_scope_flag": "in_scope" if seller_id in scope_sellers else "out_scope",
+
             "total_spu_current": total_spu,
             "normal_spu_current": normal_cnt,
-            "failed_spu_current": failed_cnt,
             "normal_rate": round(normal_rate, 6),
-            "status": status,
-            "trend_avg_spu_last_n": round(avg_spu, 4) if avg_spu else "",
-            "trend_ratio": trend_ratio,
-            "trend_status": trend_status,
+
+            "abnormal_spu_current": abnormal_cnt,
+            "spu_abnormal_threshold": SPU_ABNORMAL_THRESHOLD,
+            "Y_status": y_status,
+
+            "avg_spu_last_n_months": round(avg_spu, 6),
+            "trending_ratio": trend_ratio,
+            "trending_status": trend_stat,
+
+            "seller_status": seller_status,
         })
 
-    df_out = pd.DataFrame(results)
+    df_out = pd.DataFrame(rows)
 
-    # ---------- Attach seller metadata ----------
-    df_out = df_out.merge(
-        seller_scope,
-        how="left",
-        on="seller_used_id",
-    )
+    # ---------- SUMMARY ----------
+    seller_total = len(df_out)
+    seller_normal = int((df_out["seller_status"] == "Normal").sum())
+    seller_abnormal = seller_total - seller_normal
+    trend_normal = int((df_out["trending_status"] == "Normal").sum())
+    trend_abnormal = seller_total - trend_normal
+    in_scope = int((df_out["seller_scope_flag"] == "in_scope").sum())
+    out_scope = seller_total - in_scope
 
-    # ---------- Final columns ----------
-    df_out = df_out[
-        [
-            "seller_scope_flag",
-            "country",
-            "platform",
-            "seller_used_id",
-            "seller_name",
-            "seller_url",
-            "total_spu_current",
-            "normal_spu_current",
-            "failed_spu_current",
-            "normal_rate",
-            "status",
-            "trend_avg_spu_last_n",
-            "trend_ratio",
-            "trend_status",
-        ]
-    ].sort_values(
-        ["seller_scope_flag", "country", "platform", "seller_used_id"]
-    )
+    summary = {
+        "seller_total": seller_total,
+        "seller_normal": seller_normal,
+        "seller_abnormal": seller_abnormal,
+        "trend_normal": trend_normal,
+        "trend_abnormal": trend_abnormal,
+        "in_scope": in_scope,
+        "out_scope": out_scope,
+    }
 
+    # attach summary to first row
+    for k, v in summary.items():
+        df_out[k] = ""
+        if not df_out.empty:
+            df_out.at[0, k] = v
+
+    # ---------- Output ----------
     os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
     df_out.to_csv(OUTPUT_PATH, index=False)
 
-    print(f"✅ Seller-level result written to: {OUTPUT_PATH}")
-    print(f"[INFO] Sellers processed: {len(df_out)}")
+    print("✅ Seller level check completed")
+    print(f"[SUMMARY] {summary}")
 
 
 if __name__ == "__main__":

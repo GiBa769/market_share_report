@@ -36,49 +36,64 @@ THRESHOLD = 0.95
 
 def run_check_country_platform_level():
 
-    # ---------- Load inputs ----------
     seller_df = pd.read_csv(SELLER_RESULT_PATH)
     category_df = pd.read_csv(CATEGORY_RESULT_PATH)
 
-    # Remove SUMMARY rows
-    seller_df = seller_df[seller_df["seller_scope_flag"] != "SUMMARY"]
-    category_df = category_df[category_df["category_scope_flag"] != "SUMMARY"]
+    # =========================
+    # SELLER AGGREGATION
+    # =========================
 
-    # ---------- Seller aggregation ----------
     seller_agg = (
-        seller_df[seller_df["seller_scope_flag"] == "in_scope"]
+        seller_df
         .groupby(["country", "platform"])
-        .agg(
-            seller_total=("seller_used_id", "count"),
-            seller_normal=("status", lambda x: (x == "Normal").sum()),
-        )
+        .apply(lambda g: pd.Series({
+            # denominator: sellers IN SCOPE only
+            "seller_total_in_scope": (g["seller_scope_flag"] == "in_scope").sum(),
+
+            # numerator: NORMAL sellers (both in + out scope)
+            "seller_normal_all": (g["seller_status"] == "Normal").sum(),
+        }))
         .reset_index()
     )
 
-    seller_agg["seller_rate"] = (
-        seller_agg["seller_normal"] / seller_agg["seller_total"]
+    seller_agg["seller_rate"] = seller_agg.apply(
+        lambda r: (
+            r["seller_normal_all"] / r["seller_total_in_scope"]
+            if r["seller_total_in_scope"] > 0 else 0
+        ),
+        axis=1,
     )
 
     seller_agg["seller_check_good"] = seller_agg["seller_rate"] >= THRESHOLD
 
-    # ---------- Category aggregation ----------
+    # =========================
+    # CATEGORY AGGREGATION
+    # =========================
+
     category_agg = (
-        category_df[category_df["category_scope_flag"] == "in_scope"]
+        category_df
         .groupby(["country", "platform"])
-        .agg(
-            category_total=("category_url", "count"),
-            category_normal=("status", lambda x: (x == "Normal").sum()),
-        )
+        .apply(lambda g: pd.Series({
+            "category_total_in_scope": (g["category_scope_flag"] == "in_scope").sum(),
+            "category_normal_all": (g["category_status"] == "Normal").sum(),
+        }))
         .reset_index()
     )
 
-    category_agg["category_rate"] = (
-        category_agg["category_normal"] / category_agg["category_total"]
+    category_agg["category_rate"] = category_agg.apply(
+        lambda r: (
+            r["category_normal_all"] / r["category_total_in_scope"]
+            if r["category_total_in_scope"] > 0 else 0
+        ),
+        axis=1,
     )
 
     category_agg["category_check_good"] = category_agg["category_rate"] >= THRESHOLD
 
-    # ---------- Combine country × platform universe ----------
+    # =========================
+    # COUNTRY × PLATFORM UNIVERSE
+    # =========================
+
     cp_universe = pd.concat(
         [
             seller_df[["country", "platform"]],
@@ -87,42 +102,61 @@ def run_check_country_platform_level():
         ignore_index=True,
     ).drop_duplicates()
 
-    # ---------- Merge ----------
+    # =========================
+    # MERGE
+    # =========================
+
     result = (
         cp_universe
         .merge(seller_agg, on=["country", "platform"], how="left")
         .merge(category_agg, on=["country", "platform"], how="left")
     )
 
-    # Fill missing (no seller/category in scope)
-    result["seller_total"] = result["seller_total"].fillna(0).astype(int)
-    result["seller_normal"] = result["seller_normal"].fillna(0).astype(int)
-    result["seller_rate"] = result["seller_rate"].fillna(0)
-    result["seller_check_good"] = result["seller_check_good"].fillna(False)
+    # fill NA
+    for col in [
+        "seller_total_in_scope",
+        "seller_normal_all",
+        "category_total_in_scope",
+        "category_normal_all",
+    ]:
+        result[col] = result[col].fillna(0).astype(int)
 
-    result["category_total"] = result["category_total"].fillna(0).astype(int)
-    result["category_normal"] = result["category_normal"].fillna(0).astype(int)
-    result["category_rate"] = result["category_rate"].fillna(0)
-    result["category_check_good"] = result["category_check_good"].fillna(False)
+    for col in [
+        "seller_rate",
+        "category_rate",
+    ]:
+        result[col] = result[col].fillna(0.0)
 
-    # ---------- Final decision ----------
+    for col in [
+        "seller_check_good",
+        "category_check_good",
+    ]:
+        result[col] = result[col].fillna(False)
+
+    # =========================
+    # FINAL DECISION
+    # =========================
+
     result["good_to_use"] = (
         result["seller_check_good"] & result["category_check_good"]
     )
 
-    # ---------- Reorder ----------
+    # =========================
+    # OUTPUT
+    # =========================
+
     result = result[
         [
             "country",
             "platform",
 
-            "seller_total",
-            "seller_normal",
+            "seller_total_in_scope",
+            "seller_normal_all",
             "seller_rate",
             "seller_check_good",
 
-            "category_total",
-            "category_normal",
+            "category_total_in_scope",
+            "category_normal_all",
             "category_rate",
             "category_check_good",
 
@@ -130,7 +164,6 @@ def run_check_country_platform_level():
         ]
     ].sort_values(["country", "platform"])
 
-    # ---------- Write ----------
     os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
     result.to_csv(OUTPUT_PATH, index=False)
 
